@@ -1,0 +1,5 @@
+# Never commit credentials - auth lives only in GitHub Actions secrets.
+auth.json
+**/.codex/auth.json
+.env
+*.pem
