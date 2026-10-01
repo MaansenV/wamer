@@ -25,13 +25,12 @@ Manueller Run (**Actions → warm-usage-windows → Run workflow**) sendet immer
 Kosten: ~5 Sends/Provider/Tag à ~4,5k Tokens (fast alles CLI-System-Prompt),
 Bruchteil eines Prozents des Fenster-Budgets.
 
-## Abweichungen zum Upstream (privates Repo!)
+## Abweichungen zum Upstream
 
-- **Cron alle 2 Stunden** (`7 */2 * * *`) statt alle 30 Min — Minuten-Rechnung:
-  ein Trigger kostet ~3,5 Min über alle Jobs; 48 Trigger/Tag wären ~5.000 Min/Monat,
-  Free-Tier für private Repos sind 2.000. Mit 12 Triggern/Tag landen wir bei
-  ~1.300 Min/Monat ✅. Trade-off: nach Fenster-Ablauf im Schnitt ~1h Lücke.
-  Bei GitHub Pro oder public Repo gern zurück auf `7,37 * * * *` stellen.
+- **Public Repo:** unbegrenzte Actions-Minuten → Cron alle 30 Min (`7,37 * * * *`)
+  wie im Upstream. Secrets bleiben verschlüsselt + in Logs maskiert; der Workflow
+  hat keine PR-Trigger, Fork-PRs sehen nie Secrets. Regel: keine Workflow-Änderungen
+  aus fremden PRs mergen. Externe Actions sind per Commit-SHA gepinnt (Supply-Chain-Härtung).
 - **Codex: 1× `codex login`** (Upstream-Stand aus `warm.yml`, verifiziert 2026-08-14):
   ein 2. Login revoked das hochgeladene Token (`token_revoked`). `GH_PAT` für
   Write-back ist dadurch Pflicht für Dauerbetrieb.
@@ -93,7 +92,7 @@ Canary im Log: Dauerhaft „no active window" alle 2h = Sends registrieren nicht
 
 ## Konfiguration
 
-- **Intervall:** Cron in `warm.yml` (aktuell 2h, siehe Minuten-Rechnung oben).
+- **Intervall:** Cron in `warm.yml` (alle 30 Min; public Repo = unbegrenzte Minuten).
   `WARM_INTERVAL_SECONDS` (5h01m) und `MIN_REWARM_SECONDS` (1h Safety-Floor) nur
   anfassen, wenn du weißt warum.
 - **CLI-Pins:** `CLAUDE_CLI_VERSION` / `CODEX_CLI_VERSION` in `warm.yml` (Upstream-verifiziert).
@@ -107,12 +106,12 @@ Canary im Log: Dauerhaft „no active window" alle 2h = Sends registrieren nicht
   Account) oder Modell ohne Meter-Registrierung.
 - **Codex 401s:** Refresh-Token tot (kein Write-back ohne `GH_PAT`, oder lokale
   Parallelnutzung hat die Token-Familie rotiert) → Fix-Kommandos stehen im Auto-Issue.
-- **Minuten aufgebraucht:** Cron weiter ausdünnen oder Repo auf public stellen.
 
 ## Sicherheit
 
 - Keine Keys im Repo — Auth nur in verschlüsselten Actions-Secrets (GitHub maskiert sie in Logs).
 - `.gitignore` blockt `auth.json`/`.env`/PEM-Dateien.
+- Externe Actions sind auf volle Commit-SHAs gepinnt; keine PR-Trigger → Forks sehen nie Secrets.
 - Empfohlen: Ruleset gegen Force-Push/Branch-Deletion (Settings → Rules).
 
 ## Lizenz

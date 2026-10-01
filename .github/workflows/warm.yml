@@ -6,8 +6,11 @@ name: warm-usage-windows
 # and Codex (ChatGPT subscription) CONTINUOUSLY warm by re-sending one throwaway
 # prompt every ~5 hours, around the clock.
 #
-# Fork of https://github.com/viseshb/claude-codex-warmer (MIT), adapted for a
-# PRIVATE repo (see "Private-repo adaptations" below).
+# Fork of https://github.com/viseshb/claude-codex-warmer (MIT).
+# Public repo: unlimited Actions minutes, 30-min cron. Secrets stay encrypted
+# and masked; this workflow has no PR triggers, so fork PRs never see secrets.
+# Rule: never merge workflow changes from untrusted PRs. Third-party actions
+# are pinned to full commit SHAs (supply-chain hardening).
 #
 # Why continuous, not once-a-day: the 5h window starts on the first message and
 # EXPIRES 5h later. A single morning warm-up is useless if you sit down more
@@ -51,24 +54,16 @@ name: warm-usage-windows
 #     by default, so you find out without watching the Actions tab. Once a
 #     later run succeeds again, that issue is auto-closed.
 #
-# Private-repo adaptations (vs upstream):
-#   - Cron is every 2 hours instead of every 30 min. Minutes math: one trigger
-#     burns ~3.5 min across all jobs; 48 triggers/day would be ~5000 min/month,
-#     far above the 2000 free minutes for private repos. 12 triggers/day lands
-#     at ~1300 min/month. Trade-off: average ~1h gap after a window expires
-#     instead of ~15 min. The chain still self-heals; messaging inside a gap
-#     just starts the window yourself (never worse than without this repo).
-#     On GitHub Pro (3000 min) or a public repo, feel free to tighten back to
-#     "7,37 * * * *".
+# Upstream adaptations:
 #   - Commit-message timezone is Europe/Berlin (cosmetic only).
 #   - Codex uses the single-login strategy (see warm-codex header).
 
 on:
   schedule:
-    # Every 2 hours, 24/7 — the elapsed-time gate limits real sends to ~5/day.
-    # Offset from :00 on purpose: those are GitHub's most congested cron
+    # Every 30 min, 24/7 — the elapsed-time gate limits real sends to ~5/day.
+    # Offset from :00/:30 on purpose: those are GitHub's most congested cron
     # minutes and jobs scheduled there get delayed/skipped the most.
-    - cron: "7 */2 * * *"
+    - cron: "7,37 * * * *"
   workflow_dispatch:           # manual "Run workflow" button - always sends for real
 
 # Least privilege by default; jobs that need more elevate individually.
@@ -101,7 +96,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: Check if a window is already running
         id: check
@@ -161,7 +156,7 @@ jobs:
           fi
           echo "send=$send" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         if: steps.check.outputs.send == 'true'
         with:
           node-version: "20"
@@ -226,7 +221,7 @@ jobs:
     env:
       GH_PAT: ${{ secrets.GH_PAT }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: Restore Codex auth
         env:
@@ -287,7 +282,7 @@ jobs:
           fi
           echo "send=$send" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         if: steps.check.outputs.send == 'true'
         with:
           node-version: "20"
@@ -408,7 +403,7 @@ jobs:
   # --------------------------------------------------------------------------
   # Heartbeat — keeps the repo "active" so GitHub never auto-disables the
   # schedule after 60 idle days, even if both warm jobs are failing.
-  # Committing on every trigger would be noise, so it
+  # Committing on every trigger would be 48 commits/day of noise, so it
   # commits at most once per calendar day.
   # --------------------------------------------------------------------------
   heartbeat:
@@ -418,7 +413,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: Commit timestamp (once per day)
         run: |
