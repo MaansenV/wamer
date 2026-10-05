@@ -3,3 +3,4 @@ auth.json
 **/.codex/auth.json
 .env
 *.pem
+__pycache__/
