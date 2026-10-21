@@ -3,7 +3,7 @@
 name: warm-usage-windows
 
 # Keeps the rolling 5-hour usage windows for Claude Code (Pro/Max subscription)
-# and Codex (ChatGPT subscription) CONTINUOUSLY warm by re-sending one throwaway
+# CONTINUOUSLY warm by re-sending one throwaway
 # prompt every ~5 hours, around the clock.
 #
 # Fork of https://github.com/viseshb/claude-codex-warmer (MIT).
@@ -22,7 +22,6 @@ name: warm-usage-windows
 #
 # Auth: subscription OAuth tokens only, NO API keys.
 #   - Claude: CLAUDE_CODE_OAUTH_TOKEN  (from `claude setup-token`)
-#   - Codex:  CODEX_AUTH_JSON          (contents of ~/.codex/auth.json after `codex login`)
 #
 # Scheduling mechanics:
 #   - Cron fires around the clock. Each job first asks the ACCOUNT'S OWN
@@ -55,7 +54,7 @@ name: warm-usage-windows
 #
 # Upstream adaptations:
 #   - Commit-message timezone is Europe/Berlin (cosmetic only).
-#   - Codex uses the single-login strategy (see warm-codex header).
+#   - Codex warming removed; Claude only.
 
 on:
   schedule:
@@ -65,7 +64,7 @@ on:
     - cron: "7,17,27,37,47,57 * * * *"
   workflow_dispatch:           # manual "Run workflow" button - always sends for real
 
-# Serialize manual and scheduled runs: rotating the same auth concurrently is unsafe.
+# Serialize manual and scheduled runs: avoid duplicate sends.
 concurrency:
   group: warm-usage-windows
   cancel-in-progress: false
@@ -89,7 +88,6 @@ env:
   # not silently via an unpinned `npm install -g <pkg>@latest`. After bumping,
   # run a manual test (`gh workflow run warm.yml`) and confirm green.
   CLAUDE_CLI_VERSION: "2.1.205"
-  CODEX_CLI_VERSION: "0.144.1"   # gpt-5.6-sol needs >= 0.144
 
 jobs:
   # --------------------------------------------------------------------------
@@ -204,178 +202,6 @@ jobs:
           exit 1
 
   # --------------------------------------------------------------------------
-  # Codex — uses your ChatGPT subscription via restored auth.json.
-  # FRAGILE: refresh tokens rotate on every use. We write the refreshed
-  # auth.json back to the secret after the run so cron keeps working.
-  # This write-back needs a PAT (secret GH_PAT) with 'secrets: write'.
-  # GH_PAT is mandatory for sending. Preflight checks repo access; a failed
-  # write-back fails the job instead of pretending rotated tokens were saved.
-  #
-  # RECOVERY — log in ONCE (verified upstream 2026-08-14):
-  #   codex login
-  #   gh secret set CODEX_AUTH_JSON --repo <repo> < ~/.codex/auth.json
-  # and then leave it alone. OpenAI issues ONE refresh-token family per
-  # (user, client_id). A second `codex login` REVOKES the token you just
-  # uploaded — CI then fails with code `token_revoked`.
-  #
-  # Consequence: CI and your laptop share one token family. CI self-heals
-  # via the write-back step below as long as it refreshes first. Your
-  # laptop is what knocks it over — a local `codex login` revokes CI
-  # (`token_revoked`), and heavy local use rotates ahead of CI
-  # (`token_expired` / "refresh token was already used"). Either way the
-  # recovery is the two commands above, once.
-  # --------------------------------------------------------------------------
-  warm-codex:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    outputs:
-      warmed: ${{ steps.warm.outcome == 'success' && steps.persist.outcome == 'success' }}
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-
-      - name: Restore Codex auth
-        env:
-          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
-        run: |
-          mkdir -p "$HOME/.codex"
-          printf '%s' "$CODEX_AUTH_JSON" > "$HOME/.codex/auth.json"
-          chmod 600 "$HOME/.codex/auth.json"
-          python3 scripts/mask_codex_auth.py "$HOME/.codex/auth.json"
-
-      - name: Check if a window is already running
-        id: check
-        run: |
-          send=""
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Manual run - sending regardless of window state."
-            send=true
-          fi
-
-          now=$(date +%s)
-          last=$(cat .state/codex-last-warm.txt 2>/dev/null || echo 0)
-          case "$last" in (''|*[!0-9]*) last=0 ;; esac
-          elapsed=$(( now - last ))
-
-          # Primary gate: the account's real usage meter. When nothing has
-          # been metered recently, reset_after_seconds sits at the full
-          # window length and slides forward; an active window pins it lower.
-          if [ -z "$send" ]; then
-            usage=$(curl -sf --max-time 30 https://chatgpt.com/backend-api/wham/usage \
-              -H "Authorization: Bearer $(jq -r '.tokens.access_token' "$HOME/.codex/auth.json")" \
-              -H "chatgpt-account-id: $(jq -r '.tokens.account_id' "$HOME/.codex/auth.json")" || true)
-            if printf '%s' "$usage" | jq -e '.rate_limit.primary_window.reset_after_seconds' >/dev/null 2>&1; then
-              reset_after=$(printf '%s' "$usage" | jq -r '.rate_limit.primary_window.reset_after_seconds')
-              window=$(printf '%s' "$usage" | jq -r '.rate_limit.primary_window.limit_window_seconds // 18000')
-              if [ "$reset_after" -lt $((window - 120)) ]; then
-                echo "Live meter: window active (resets in ${reset_after}s) - skipping."
-                send=false
-              elif [ "$elapsed" -lt "$MIN_REWARM_SECONDS" ]; then
-                echo "Live meter says cold but we sent ${elapsed}s ago - skipping (safety floor)."
-                send=false
-              else
-                echo "Live meter: no active window - warming."
-                send=true
-              fi
-            else
-              echo "Live meter unavailable - falling back to state file."
-            fi
-          fi
-
-          # Fallback gate: our own last-send timestamp.
-          if [ -z "$send" ]; then
-            if [ "$elapsed" -lt "$WARM_INTERVAL_SECONDS" ]; then
-              echo "State file: warmed ${elapsed}s ago (< ${WARM_INTERVAL_SECONDS}s) - skipping."
-              send=false
-            else
-              echo "State file: last warm ${elapsed}s ago - warming."
-              send=true
-            fi
-          fi
-          echo "send=$send" >> "$GITHUB_OUTPUT"
-
-      - name: Validate secret write-back access
-        if: steps.check.outputs.send == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "GH_PAT is required: fine-grained PAT for this repo with Secrets read/write."
-            exit 1
-          fi
-          gh api "repos/${{ github.repository }}/actions/secrets/public-key" >/dev/null
-          # An unchanged upload proves write access before Codex can rotate tokens.
-          gh secret set CODEX_AUTH_JSON --repo "${{ github.repository }}" \
-            < "$HOME/.codex/auth.json"
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        if: steps.check.outputs.send == 'true'
-        with:
-          node-version: "22"
-
-      - name: Install Codex CLI
-        if: steps.check.outputs.send == 'true'
-        run: npm install -g "@openai/codex@${CODEX_CLI_VERSION}"
-
-      - name: Send warm-up prompt
-        id: warm
-        if: steps.check.outputs.send == 'true'
-        run: |
-          # NOT the mini model: gpt-5.4-mini bills a separate bucket and does
-          # not register on the account's 5h window meter at all, so a mini
-          # "hi" never starts a window (verified empirically upstream 2026-07-10).
-          # The warm must use the same metered model the apps use.
-          log=$(mktemp)
-          trap 'rm -f "$log"' EXIT
-          for i in 1 2 3; do
-            status=0
-            timeout 120s codex exec --skip-git-repo-check -m gpt-5.6-sol \
-              -c model_reasoning_effort="low" "hi" >"$log" 2>&1 || status=$?
-            # Register newly rotated token fields before showing CLI output.
-            python3 scripts/mask_codex_auth.py "$HOME/.codex/auth.json"
-            cat "$log"
-            if [ "$status" -eq 0 ]; then exit 0; fi
-            echo "Attempt $i failed, retrying in 10s..."
-            sleep 10
-          done
-          echo "All 3 attempts failed."
-          exit 1
-
-      - name: Persist refreshed auth back to secret
-        id: persist
-        if: ${{ always() && steps.check.outputs.send == 'true' && steps.warm.outcome != 'skipped' && steps.warm.outcome != '' }}
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: |
-          # Save rotations even when a request failed after refreshing auth.
-          python3 scripts/mask_codex_auth.py "$HOME/.codex/auth.json"
-          for i in 1 2 3; do
-            gh secret set CODEX_AUTH_JSON --repo "${{ github.repository }}" \
-              < "$HOME/.codex/auth.json" && exit 0
-            echo "Auth write-back attempt $i failed. Check GH_PAT repo access and Secrets read/write."
-            sleep 5
-          done
-          exit 1
-
-      - name: Record warm timestamp
-        if: ${{ always() && steps.warm.outcome == 'success' }}
-        run: |
-          mkdir -p .state
-          date +%s > .state/codex-last-warm.txt
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .state/codex-last-warm.txt
-          git diff --cached --quiet && exit 0
-          git commit -m "chore: warm codex $(TZ='Europe/Berlin' date '+%F %H:%M %Z')"
-          for i in 1 2 3; do
-            git pull --rebase --autostash && git push && exit 0
-            sleep $((RANDOM % 5 + 1))
-          done
-          echo "Failed to record Codex warm timestamp."
-          exit 1
-
-  # --------------------------------------------------------------------------
   # Notify — the only time you should ever need to look at this repo. If a
   # warm job fails (all 3 retries exhausted - a real auth/CLI problem, not a
   # blip), open one GitHub issue with the exact fix. GitHub emails repo
@@ -383,7 +209,7 @@ jobs:
   # anyone polling Actions. Once things succeed again, auto-close it.
   # --------------------------------------------------------------------------
   notify:
-    needs: [warm-claude, warm-codex]
+    needs: [warm-claude]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:
@@ -393,16 +219,15 @@ jobs:
       REPO: ${{ github.repository }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       CLAUDE_FAILED: ${{ needs.warm-claude.result == 'failure' }}
-      CODEX_FAILED: ${{ needs.warm-codex.result == 'failure' }}
     steps:
       - name: Open or update failure issue
-        if: env.CLAUDE_FAILED == 'true' || env.CODEX_FAILED == 'true'
+        if: env.CLAUDE_FAILED == 'true'
         run: |
           title="Warm-up needs attention"
           existing=$(gh issue list --repo "$REPO" --state open --json number,title \
             --jq '[.[] | select(.title=="'"$title"'")][0].number // empty')
 
-          body="Automated warm-up, authentication preflight, token write-back, or state persistence failed. Inspect the failed step: $RUN_URL"$'\n\n'
+          body="Automated warm-up, authentication, or state persistence failed. Inspect the failed step: $RUN_URL"$'\n\n'
 
           if [ "$CLAUDE_FAILED" = "true" ]; then
             body+="### Claude"$'\n'
@@ -413,18 +238,7 @@ jobs:
             body+='```'$'\n\n'
           fi
 
-          if [ "$CODEX_FAILED" = "true" ]; then
-            body+="### Codex"$'\n'
-            body+='For missing GH_PAT or HTTP 403 on secret write-back: create a fine-grained PAT for this repository with Secrets read/write, then run `gh secret set GH_PAT --repo '$REPO'`. Do not re-login just to fix PAT permissions.'$'\n\n'
-            body+='Only for revoked/expired Codex authentication, recover in your own terminal:'$'\n'
-            body+='```bash'$'\n'
-            body+='codex login'$'\n'
-            body+="gh secret set CODEX_AUTH_JSON --repo $REPO < ~/.codex/auth.json"$'\n'
-            body+='```'$'\n\n'
-            body+='**Do NOT run `codex login` again afterwards.** OpenAI issues one refresh-token family per account, so a second login revokes the token you just uploaded and CI fails with `token_revoked`. Upload the auth.json from your most recent login, then leave it alone.'$'\n\n'
-          fi
-
-          body+="This issue will auto-close only after both providers actually send successfully and Codex auth is persisted. Skip-only runs do not prove recovery."
+          body+="This issue will auto-close only after Claude actually sends successfully. Skip-only runs do not prove recovery."
 
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --repo "$REPO" --body "$body"
@@ -433,24 +247,24 @@ jobs:
           fi
 
       - name: Close resolved failure issue
-        if: ${{ needs.warm-claude.result == 'success' && needs.warm-codex.result == 'success' && needs.warm-claude.outputs.warmed == 'true' && needs.warm-codex.outputs.warmed == 'true' }}
+        if: ${{ needs.warm-claude.result == 'success' && needs.warm-claude.outputs.warmed == 'true' }}
         run: |
           title="Warm-up needs attention"
           existing=$(gh issue list --repo "$REPO" --state open --json number,title \
             --jq '[.[] | select(.title=="'"$title"'")][0].number // empty')
           if [ -n "$existing" ]; then
             gh issue close "$existing" --repo "$REPO" \
-              --comment "Resolved - both warm-up sends and Codex auth write-back succeeded. Closing automatically."
+              --comment "Resolved - Claude warm-up send succeeded. Closing automatically."
           fi
 
   # --------------------------------------------------------------------------
   # Heartbeat — keeps the repo "active" so GitHub never auto-disables the
-  # schedule after 60 idle days, even if both warm jobs are failing.
+  # schedule after 60 idle days, even if the warm job is failing.
   # Committing on every trigger would be 48 commits/day of noise, so it
   # commits at most once per calendar day.
   # --------------------------------------------------------------------------
   heartbeat:
-    needs: [warm-claude, warm-codex]
+    needs: [warm-claude]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:
